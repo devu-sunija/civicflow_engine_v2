@@ -1,46 +1,72 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import os
 import folium
 from streamlit_folium import st_folium
 
-# --- YOUR MOVED BACKEND LOGIC ---
-def calculate_traffic_impact(event_type, footfall, weather):
-    # This is your math logic from backend.py
-    base_congestion = 0.5
-    if event_type == "Cricket Match": base_congestion += 0.2
-    if weather == "Heavy Rain": base_congestion += 0.25
-    
-    congestion = min(base_congestion + (footfall / 100000), 1.0)
-    officers = int(congestion * 100)
-    barricades = int(congestion * 300)
-    return congestion * 100, officers, barricades
+# --- 1. DATA INGESTION ---
+DATA_FILENAME = "traffic_data.csv"
+if os.path.exists(DATA_FILENAME):
+    df = pd.read_csv(DATA_FILENAME)
+    df.columns = df.columns.str.strip().str.lower()
+else:
+    # Fallback data if file missing
+    data = {'geohash': ["tdr1w2", "tdr1w4", "tdr1w9", "tdr1w1", "tdr34e", "tdr45g"], 
+            'demand': [0.5, 0.4, 0.6, 0.3, 0.7, 0.4]}
+    df = pd.DataFrame(data)
 
-# --- YOUR STREAMLIT FRONTEND UI ---
+# --- 2. LOGIC (Formerly Backend) ---
+def extract_geohash(lat, lon):
+    lat_idx = int((lat - 12.9) * 100) % 3
+    lon_idx = int((lon - 77.5) * 100) % 2
+    matrix = [["tdr1w2", "tdr1w4"], ["tdr1w9", "tdr1w1"], ["tdr34e", "tdr45g"]]
+    return matrix[lat_idx][lon_idx]
+
+def calculate_resources(event_type, footfall, lat, lon, weather):
+    target_hash = extract_geohash(lat, lon)
+    base_demand = df[df['geohash'] == target_hash]['demand'].mean() if 'geohash' in df.columns else 0.38
+    
+    # Non-linear equation
+    impact = 0.50 * (1 - np.exp(-footfall / 22000))
+    weather_scalar = 1.25 if "rain" in weather.lower() else 1.00
+    final_congestion = min(1.00, (base_demand + impact) * weather_scalar)
+    
+    profiles = {
+        "Political Rally": {"o": 0.0015, "b": 0.0045},
+        "Cricket Match": {"o": 0.0011, "b": 0.0038},
+        "Festival": {"o": 0.0018, "b": 0.0052}
+    }
+    config = profiles.get(event_type, {"o": 0.0010, "b": 0.0035})
+    
+    officers = max(8, int((footfall * config["o"]) * (1.0 + final_congestion)))
+    barricades = max(15, int((footfall * config["b"]) * (1.0 + final_congestion)))
+    
+    return final_congestion, officers, barricades, target_hash
+
+# --- 3. UI (Frontend) ---
 st.set_page_config(layout="wide")
 st.title("CivicFlow AI: Event-Driven Congestion Control Room")
 
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("Schedule New Event")
-    e_type = st.selectbox("Event Type", ["Cricket Match", "Concert", "Rally"])
+    e_type = st.selectbox("Event Type", ["Cricket Match", "Political Rally", "Festival", "Construction"])
     footfall = st.number_input("Expected Footfall", value=32500)
-    weather = st.radio("Weather Condition", ["Clear", "Heavy Rain"])
+    lat = st.number_input("Latitude", value=12.97, format="%.4f")
+    lon = st.number_input("Longitude", value=77.59, format="%.4f")
+    weather = st.radio("Weather", ["Clear", "Heavy Rain"])
     
     if st.button("Analyze Traffic Impact"):
-        # DIRECT FUNCTION CALL (No more "Link Broken" errors!)
-        cong, off, bar = calculate_traffic_impact(e_type, footfall, weather)
-        st.session_state['result'] = (cong, off, bar)
+        st.session_state['res'] = calculate_resources(e_type, footfall, lat, lon, weather)
 
 with col2:
-    st.subheader("Live Predictive Analytics")
-    if 'result' in st.session_state:
-        c, o, b = st.session_state['result']
-        st.metric("Predicted Congestion", f"{c:.1f}%")
-        st.metric("Officers Required", f"{o} Pers.")
-        st.metric("Barricades Needed", f"{b} Units")
+    if 'res' in st.session_state:
+        cong, off, bar, gh = st.session_state['res']
+        st.metric("Predicted Congestion", f"{cong*100:.1f}%")
+        st.metric("Officers Required", f"{off} Pers.")
+        st.metric("Barricades Needed", f"{bar} Units")
         
-        # Map
-        m = folium.Map(location=[12.9812, 77.6412], zoom_start=14)
-        folium.Circle([12.9812, 77.6412], radius=500, color="red").add_to(m)
+        m = folium.Map(location=[lat, lon], zoom_start=14)
+        folium.Marker([lat, lon], popup=gh, icon=folium.Icon(color="red")).add_to(m)
         st_folium(m, width=700)
